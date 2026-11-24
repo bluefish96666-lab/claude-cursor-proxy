@@ -10,7 +10,7 @@
 
 Adapted from [raine/claude-code-proxy](https://github.com/raine/claude-code-proxy). This project is a **Cursor-first** local **proxy** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Grok Build](https://x.ai/cli) (`grok` / grok-build).
 
-**Run Cursor models (Fable 5) from Claude Code or grok-build — stably.**
+**Run Cursor models (Fable 5.2) from Claude Code or grok-build — stably.**
 
 ```
 Claude Code ──Anthropic /v1/messages──► claude-cursor-proxy (:18765)
@@ -35,7 +35,7 @@ This tool runs a local one-way proxy (default `127.0.0.1:18765`):
 2. The proxy translates them for Cursor and forwards upstream
 3. It streams the matching SSE back — Anthropic `ping` keep-alive for Claude Code, Responses events for grok-build
 
-Primary upstream: **Cursor (Fable 5)**. Additional backends in the same process: Codex, Kimi, Grok.
+Primary upstream: **Cursor (Fable 5.2)**. Additional backends in the same process: Codex, Kimi, Grok.
 
 > Not affiliated with Anthropic, Cursor, OpenAI, Moonshot, or xAI.
 
@@ -46,7 +46,7 @@ Primary upstream: **Cursor (Fable 5)**. Additional backends in the same process:
 | | |
 | --- | --- |
 | **Stable sessions** | HTTP/2 BiDi upstream + Anthropic `ping` SSE keep-alive downstream |
-| **Fable 5** | Set `ANTHROPIC_MODEL=claude-fable-5[1m]` (and the same for `ANTHROPIC_SMALL_FAST_MODEL`) |
+| **Fable 5.2** | Set `ANTHROPIC_MODEL=claude-fable-5-2[1m]` (and the same for `ANTHROPIC_SMALL_FAST_MODEL`) |
 | **Usage / ctx** | Cursor turn usage mapped onto Anthropic `usage` for status lines and compaction |
 | **Tools** | Cursor exec / native tools remapped into Claude Code and grok-build tool loops (best-effort) |
 | **Simple install** | Checksummed binaries; macOS ad-hoc codesign; config under `~/.config/claude-cursor-proxy` |
@@ -142,13 +142,13 @@ account, so two models can use different accounts concurrently in one `serve`
 process. The TUI stores the stable account id; labels and emails remain useful
 selectors for headless configuration.
 
-### Point Claude Code at the proxy (Fable 5)
+### Point Claude Code at the proxy (Fable 5.2)
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:18765
 export ANTHROPIC_AUTH_TOKEN=unused
-export ANTHROPIC_MODEL=claude-fable-5[1m]
-export ANTHROPIC_SMALL_FAST_MODEL=claude-fable-5[1m]
+export ANTHROPIC_MODEL=claude-fable-5-2[1m]
+export ANTHROPIC_SMALL_FAST_MODEL=claude-fable-5-2[1m]
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1
 claude
@@ -261,21 +261,26 @@ Media routes (`/v1/images/*`, `/v1/videos/*`) proxy to `https://api.x.ai/v1` (ov
 
 ## Models
 
-Set `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` to **full model ids**. Recommended Cursor default: `claude-fable-5[1m]`.
+Set `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` to **full model ids**. Recommended Cursor default: `claude-fable-5-2[1m]` (also `claude-fable-5-1[1m]`, `claude-fable-5[1m]`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`).
 
-Other backends use their own full ids (for example `gpt-5.6-sol[1m]`, `kimi-for-coding`, `grok-composer-2.5-fast`). Unknown ids return **400**.
+Other backends use their own full ids (for example `gpt-5.6-sol[1m]`, `kimi-for-coding`, `grok-4.7`, `grok-composer-2.5-fast`). Unknown ids return **400**. While `serve` is logged in, `GET /v1/models` merges Cursor's live catalog (Gemini 4 / Grok 4.7 / Kimi K3 / …); the static `models` command lists built-in aliases.
 
 ### How to list supported models
 
 ```bash
-# Built-in registry
+# Static registry + live Cursor AvailableModels lanes (OMP-style) when logged in
 claude-cursor-proxy models
 claude-cursor-proxy models --full
 
 # While serve is running — Anthropic-compatible list
-# (merges Cursor GetUsableModels when logged in + registry)
+# (AvailableModels lanes first, then unrepresented GetUsableModels + registry)
 curl -s http://127.0.0.1:18765/v1/models | jq '.data[].id'
 ```
+
+Cursor listing follows the same shape as [`oh-my-pi`](https://github.com/can1357/oh-my-pi):
+`AvailableModels` is the account roster (one id per family/fast/context lane;
+effort is a request parameter), and `GetUsableModels` only appends slugs the
+rich catalog does not already cover.
 
 ## Sand mode
 

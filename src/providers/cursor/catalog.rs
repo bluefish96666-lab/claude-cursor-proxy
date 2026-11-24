@@ -205,6 +205,36 @@ pub fn cached_for_account(token: &str, client_type: &str) -> Option<Vec<CatalogM
         .map(|snapshot| snapshot.models.clone())
 }
 
+/// True when any still-fresh AvailableModels snapshot knows this id as a
+/// family, alias, lane, or legacy slug.  Used by the registry so OMP-style
+/// lane ids such as `grok-4.7-fast` route to Cursor even when they are absent
+/// from the legacy `GetUsableModels` flat list.
+pub fn known_id(id: &str) -> bool {
+    let id = id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    let Ok(mut guard) = cache().lock() else {
+        return false;
+    };
+    prune_locked(&mut guard);
+    for snapshot in guard.entries.values() {
+        if snapshot.fetched_at.elapsed() >= CATALOG_TTL {
+            continue;
+        }
+        if resolve(&snapshot.models, id).is_some() {
+            return true;
+        }
+        if advertised_lane_ids(&snapshot.models)
+            .iter()
+            .any(|lane| lane.eq_ignore_ascii_case(id))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Clear all dynamic catalog state.  This is used when the auth loader loses
 /// its active account and in deterministic tests.
 pub fn clear() {
@@ -491,6 +521,204 @@ pub fn parse_variant_string(value: &str) -> Vec<CatalogParameter> {
         .collect()
 }
 
+/// Build the OMP-style advertised Cursor roster from `AvailableModels`.
+///
+/// oh-my-pi treats `AvailableModels` as the account's authoritative list and
+/// collapses effort/thinking into a per-lane ladder.  Claude Code's
+/// `/v1/models` picker should mirror that: one id per cost/context/fast lane,
+/// not one row per `GetUsableModels` effort slug.  Effort remains selectable
+/// through request parameters / bare-family default resolution.
+pub fn advertised_lane_ids(models: &[CatalogModel]) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for model in models {
+        let family = model
+            .server_model_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| model.name.trim());
+        if family.is_empty() {
+            continue;
+        }
+        out.insert(family.to_string());
+        let display = model.name.trim();
+        if !display.is_empty() {
+            out.insert(display.to_string());
+        }
+        for alias in &model.id_aliases {
+            let alias = alias.trim();
+            if !alias.is_empty() {
+                out.insert(alias.to_string());
+            }
+        }
+
+        if model.variants.is_empty() {
+            continue;
+        }
+
+        let mut lanes: std::collections::BTreeMap<String, Vec<&CatalogVariant>> =
+            std::collections::BTreeMap::new();
+        for variant in &model.variants {
+            let key = non_effort_lane_key(variant);
+            lanes.entry(key).or_default().push(variant);
+        }
+
+        let defaults = default_non_effort_values(model);
+        for (key, variants) in lanes {
+            let lane = lane_id_for_group(family, &key, &defaults, &variants);
+            if !lane.is_empty() {
+                out.insert(lane);
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Return true when a `GetUsableModels` slug is already covered by an
+/// AvailableModels lane/family.  Matching OMP: do not re-advertise exploded
+/// effort tiers that the rich catalog already represents.
+pub fn usable_slug_represented(models: &[CatalogModel], slug: &str) -> bool {
+    let slug = slug.trim();
+    if slug.is_empty() {
+        return false;
+    }
+    if resolve(models, slug).is_some() {
+        return true;
+    }
+    let advertised = advertised_lane_ids(models);
+    let lower = slug.to_ascii_lowercase();
+    advertised.iter().any(|lane| {
+        let lane_lower = lane.to_ascii_lowercase();
+        lower == lane_lower
+            || lower.starts_with(&format!("{lane_lower}-"))
+            || lane_lower.starts_with(&format!("{lower}-"))
+    })
+}
+
+fn is_reasoning_parameter_id(id: &str) -> bool {
+    matches!(
+        id.trim().to_ascii_lowercase().as_str(),
+        "effort"
+            | "reasoning"
+            | "reasoning_effort"
+            | "thinking_effort"
+            | "thinking"
+            | "reasoningeffort"
+            | "thinkingeffort"
+    )
+}
+
+fn non_effort_lane_key(variant: &CatalogVariant) -> String {
+    let mut parts: Vec<String> = variant
+        .parameters
+        .iter()
+        .filter(|parameter| !is_reasoning_parameter_id(&parameter.id))
+        .filter(|parameter| {
+            let value = parameter.value.trim();
+            !value.is_empty() && !value.eq_ignore_ascii_case("false")
+        })
+        .map(|parameter| {
+            format!(
+                "{}={}",
+                parameter.id.trim().to_ascii_lowercase(),
+                parameter.value.trim().to_ascii_lowercase()
+            )
+        })
+        .collect();
+    parts.sort_unstable();
+    parts.join("&")
+}
+
+fn default_non_effort_values(model: &CatalogModel) -> std::collections::BTreeMap<String, String> {
+    let mut defaults = std::collections::BTreeMap::new();
+    for variant in &model.variants {
+        for parameter in &variant.parameters {
+            if is_reasoning_parameter_id(&parameter.id) {
+                continue;
+            }
+            let id = parameter.id.trim().to_ascii_lowercase();
+            let value = parameter.value.trim().to_ascii_lowercase();
+            if id.is_empty() || value.is_empty() || value == "false" {
+                continue;
+            }
+            defaults.entry(id).or_insert(value);
+        }
+    }
+    defaults
+}
+
+fn lane_id_for_group(
+    family: &str,
+    key: &str,
+    defaults: &std::collections::BTreeMap<String, String>,
+    variants: &[&CatalogVariant],
+) -> String {
+    if key.is_empty() {
+        return family.to_string();
+    }
+
+    // Prefer an existing legacy slug that itself looks like a lane (no effort
+    // token) when the server already publishes one.
+    for variant in variants {
+        if let Some(slug) = variant
+            .legacy_slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|slug| !slug.is_empty())
+        {
+            if !slug_has_effort_token(slug) {
+                return slug.to_string();
+            }
+        }
+    }
+
+    let mut suffixes = Vec::new();
+    for pair in key.split('&') {
+        let Some((id, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if value == "false" {
+            continue;
+        }
+        if value == "true" {
+            suffixes.push(id.to_string());
+            continue;
+        }
+        if defaults.get(id).is_some_and(|default| default == value) {
+            // Default axis value collapses into the bare family lane, matching
+            // OMP's cursorLaneId behaviour for non-boolean parameters.
+            continue;
+        }
+        if id == "context" {
+            suffixes.push(value.to_string());
+        } else {
+            suffixes.push(format!("{id}-{value}"));
+        }
+    }
+    if suffixes.is_empty() {
+        family.to_string()
+    } else {
+        format!("{family}-{}", suffixes.join("-"))
+    }
+}
+
+fn slug_has_effort_token(slug: &str) -> bool {
+    slug.to_ascii_lowercase().split('-').any(|token| {
+        matches!(
+            token,
+            "minimal"
+                | "none"
+                | "low"
+                | "medium"
+                | "high"
+                | "xhigh"
+                | "max"
+                | "thinking"
+                | "extra"
+        )
+    })
+}
+
 /// Conservative fallback for legacy slugs when the server omitted variant
 /// metadata.  It intentionally does not strip arbitrary suffixes.
 pub fn infer_parameters_from_variant_id(value: &str) -> Vec<CatalogParameter> {
@@ -552,6 +780,30 @@ mod tests {
         assert_eq!(matched.family_id, "grok-4.6");
         assert_eq!(matched.parameters.len(), 2);
         assert_eq!(resolve(&models, "GROK").unwrap().family_id, "grok-4.6");
+    }
+
+    #[test]
+    fn advertised_lanes_collapse_effort_like_omp() {
+        let body = r#"{"models":[{
+            "name":"claude-fable-5-2",
+            "serverModelName":"claude-fable-5-2",
+            "idAliases":["fable-5-2"],
+            "variants":[
+              {"legacySlug":"claude-fable-5-2-high","parameterValues":[{"id":"effort","value":"high"}]},
+              {"legacySlug":"claude-fable-5-2-max","parameterValues":[{"id":"effort","value":"max"}]},
+              {"legacySlug":"claude-fable-5-2-high-fast","parameterValues":[{"id":"effort","value":"high"},{"id":"fast","value":"true"}]},
+              {"legacySlug":"claude-fable-5-2-max-fast","parameterValues":[{"id":"effort","value":"max"},{"id":"fast","value":"true"}]}
+            ]
+        }]}"#;
+        let models = parse_json(body).unwrap();
+        let lanes = advertised_lane_ids(&models);
+        assert!(lanes.iter().any(|id| id == "claude-fable-5-2"));
+        assert!(lanes.iter().any(|id| id == "fable-5-2"));
+        assert!(lanes.iter().any(|id| id == "claude-fable-5-2-fast" || id.ends_with("-fast")));
+        assert!(!lanes.iter().any(|id| id == "claude-fable-5-2-high"));
+        assert!(!lanes.iter().any(|id| id == "claude-fable-5-2-max"));
+        assert!(usable_slug_represented(&models, "claude-fable-5-2-high"));
+        assert!(usable_slug_represented(&models, "claude-fable-5-2-max-fast"));
     }
 
     #[test]

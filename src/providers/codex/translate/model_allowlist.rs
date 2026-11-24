@@ -20,14 +20,19 @@ pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("haiku", "gpt-5.6-luna"),
     ("claude-haiku-4-5", "gpt-5.6-luna"),
     ("claude-haiku-4-5-20251001", "gpt-5.6-luna"),
+    ("claude-haiku-5-5", "gpt-5.6-luna"),
     ("sonnet", "gpt-5.6-terra"),
     ("claude-sonnet-4-6", "gpt-5.6-terra"),
     ("claude-sonnet-5", "gpt-5.6-terra"),
+    ("claude-sonnet-5-5", "gpt-5.6-terra"),
     ("opus", "gpt-5.6-sol"),
     ("claude-opus-4-7", "gpt-5.6-sol"),
     ("claude-opus-4-8", "gpt-5.6-sol"),
+    ("claude-opus-5-5", "gpt-5.6-sol"),
     ("fable", "gpt-5.6-sol"),
     ("claude-fable-5", "gpt-5.6-sol"),
+    ("claude-fable-5-1", "gpt-5.6-sol"),
+    ("claude-fable-5-2", "gpt-5.6-sol"),
 ];
 
 #[derive(Debug, Clone)]

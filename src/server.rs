@@ -211,8 +211,12 @@ async fn metrics(
 
 /// Anthropic/OpenAI-compatible model list.
 ///
-/// Prefer a union of Cursor's live `GetUsableModels` catalog (when auth is
-/// available) and the registry so Codex/Kimi/Grok ids stay discoverable.
+/// Follow oh-my-pi's Cursor provider shape:
+/// - `AvailableModels` is the account's authoritative lane roster (family /
+///   fast / context lanes; effort stays a request parameter).
+/// - `GetUsableModels` is a fallback / append path for slugs the rich catalog
+///   does not represent.
+/// - Static registry ids (Codex / Kimi / Grok / aliases) remain discoverable.
 ///
 /// Cursor fable-family ids are rewritten through [`anthropic_list_model_id`] so
 /// Claude Code sees a `[1m]` marker (1M context) on this surface.
@@ -328,20 +332,43 @@ async fn handler_models(State(state): State<Arc<AppState>>) -> Json<serde_json::
             let client = client.clone();
             let token = auth.access_token.clone();
             async move {
-                // A live catalog is optional.  Treat both an upstream error
-                // and a timeout as a cache miss, then continue assembling the
-                // response from policy and static registry entries.
-                tokio::time::timeout(
+                // Probe AvailableModels (authoritative lanes) and
+                // GetUsableModels (legacy append) together. Either may fail;
+                // discovery is best-effort and must not block the static list.
+                let available = tokio::time::timeout(
+                    MODEL_CATALOG_FETCH_TIMEOUT,
+                    client.fetch_available_models_for_client_type(&token, &client_type),
+                );
+                let usable = tokio::time::timeout(
                     MODEL_CATALOG_FETCH_TIMEOUT,
                     client.fetch_usable_models_for_client_type(&token, &client_type),
-                )
-                .await
+                );
+                let (available, usable) = tokio::join!(available, usable);
+                (available, usable)
             }
         });
-        for result in futures_util::future::join_all(fetches).await {
-            if let Ok(Ok(ids)) = result {
+        for (available, usable) in futures_util::future::join_all(fetches).await {
+            let rich = match available {
+                Ok(Ok(models)) if !models.is_empty() => Some(models),
+                _ => None,
+            };
+            if let Some(ref models) = rich {
+                for id in crate::providers::cursor::catalog::advertised_lane_ids(models) {
+                    push(&mut data, &mut seen, anthropic_list_model_id(&id), "cursor");
+                }
+            }
+            if let Ok(Ok(ids)) = usable {
                 for id in ids {
-                    // Fable catalog → …[1m]; other catalog ids unchanged.
+                    // OMP append path: keep GetUsableModels rows only when the
+                    // rich AvailableModels roster does not already cover them.
+                    if rich
+                        .as_ref()
+                        .is_some_and(|models| {
+                            crate::providers::cursor::catalog::usable_slug_represented(models, &id)
+                        })
+                    {
+                        continue;
+                    }
                     push(&mut data, &mut seen, anthropic_list_model_id(&id), "cursor");
                 }
             }
@@ -382,13 +409,15 @@ async fn handler_models(State(state): State<Arc<AppState>>) -> Json<serde_json::
             push(&mut data, &mut seen, id, "cursor");
         }
     } else {
-        // Ensure the Fable 1M wire id is always present for gateway discovery.
-        push(
-            &mut data,
-            &mut seen,
-            anthropic_list_model_id("claude-fable-5"),
-            "cursor",
-        );
+        // Ensure Fable family 1M wire ids are always present for gateway discovery.
+        for family in ["claude-fable-5", "claude-fable-5-1", "claude-fable-5-2"] {
+            push(
+                &mut data,
+                &mut seen,
+                anthropic_list_model_id(family),
+                "cursor",
+            );
+        }
     }
 
     Json(json!({

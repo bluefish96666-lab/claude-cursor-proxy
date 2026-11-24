@@ -13,16 +13,21 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "haiku",
     "claude-haiku-4-5",
     "claude-haiku-4-5-20251001",
+    "claude-haiku-5-5",
     "sonnet",
     "claude-sonnet-4-6",
     "claude-sonnet-5",
+    "claude-sonnet-5-5",
     "opus",
     "claude-opus-5",
     "claude-opus-5-thinking-high",
+    "claude-opus-5-5",
     "claude-opus-4-7",
     "claude-opus-4-8",
     "fable",
     "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-fable-5-2",
 ];
 
 pub const CURSOR_PREFIXES: &[&str] = &["cursor:", "cursor-plan:", "cursor-ask:"];
@@ -40,7 +45,12 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
 ];
 
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "k2.6"];
-pub(crate) const GROK_MODELS: &[&str] = &["grok-composer-2.5-fast", "grok-4.5", "grok-4.6"];
+// Keep native Grok on the xAI-backed ids. Cursor's own Grok 4.7 family
+// (`grok-4.7`, `grok-4.7-fast`, …) is advertised by AvailableModels and must
+// stay off this table so Claude Code `/model grok-4.7` hits Cursor, not the
+// native provider's OAuth gate.
+pub(crate) const GROK_MODELS: &[&str] =
+    &["grok-composer-2.5-fast", "grok-4.5", "grok-4.6"];
 
 pub struct Registry {
     alias_provider: AliasProvider,
@@ -440,6 +450,12 @@ fn is_unclaimed_cursor_catalog_id(model: &str) -> bool {
     {
         return true;
     }
+    // OMP-style AvailableModels lanes (e.g. `grok-4.7-fast`) are often absent
+    // from GetUsableModels; still treat them as Cursor when the rich catalog
+    // has seen them for any fresh account/identity.
+    if crate::providers::cursor::catalog::known_id(model) {
+        return true;
+    }
     crate::providers::cursor::model::resolve_cursor_model(model).is_ok()
 }
 
@@ -623,7 +639,16 @@ mod tests {
         // Keep this alias-provider contract independent of any runtime Sand
         // model policy.
         let empty_sand = crate::config::SandRoutingPolicy::empty();
-        for model in ["claude-sonnet-5", "fable", "claude-fable-5"] {
+        for model in [
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
+            "fable",
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "claude-fable-5-2",
+        ] {
             let p = registry.provider_for_model_with_policies(
                 model,
                 None,
@@ -732,6 +757,30 @@ mod tests {
                 .provider_for_model_with_policies(model, None, &empty_accounts, &empty_sand)
                 .expect("native Grok model should remain routable");
             assert_eq!(provider.name(), "grok", "{model} must not be promoted");
+        }
+    }
+
+    #[test]
+    fn cursor_grok_47_family_routes_to_cursor_not_native() {
+        let registry = Registry::new(AliasProvider::Codex);
+        let empty_accounts = crate::config::CursorAccountRoutingPolicy::empty();
+        let empty_sand = crate::config::SandRoutingPolicy::empty();
+        for model in [
+            "grok-4.7",
+            "grok-4.7-fast",
+            "grok-4.7-500k",
+            "grok-4.7-500k-fast",
+            "grok-4.7-high",
+            "grok-4.7-high-fast",
+        ] {
+            let provider = registry
+                .provider_for_model_with_policies(model, None, &empty_accounts, &empty_sand)
+                .unwrap_or_else(|| panic!("{model} should route"));
+            assert_eq!(
+                provider.name(),
+                "cursor",
+                "{model} is Cursor's Grok 4.7 family and must not hit native Grok OAuth"
+            );
         }
     }
 

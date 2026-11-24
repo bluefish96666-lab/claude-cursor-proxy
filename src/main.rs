@@ -211,6 +211,10 @@ fn main() -> Result<()> {
         }
         Commands::Models { full } => {
             print_models(&Registry::with_default_alias(), full);
+            // Mirror `omp models cursor`: prefer the live AvailableModels lane
+            // roster when Cursor auth is present, instead of only the static
+            // fallback aliases that lag Cursor's account catalog.
+            print_live_cursor_models(full);
             Ok(())
         }
         Commands::McpDoctor { options } => {
@@ -707,8 +711,78 @@ fn print_models(registry: &Registry, full: bool) {
         if full || provider != "cursor" {
             println!("{provider}: {}", models.join(", "));
         } else {
-            println!("{provider}: {}", compact_cursor_list(models));
+            println!("{provider} (static): {}", compact_cursor_list(models));
         }
+    }
+}
+
+fn print_live_cursor_models(full: bool) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let Some(auth) = runtime
+        .block_on(async {
+            match tokio::task::spawn_blocking(|| {
+                claude_cursor_proxy::providers::cursor::auth::load_cursor_auth()
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        claude_cursor_proxy::providers::cursor::auth::load_cursor_desktop_auth()
+                            .ok()
+                            .flatten()
+                    })
+            })
+            .await
+            {
+                Ok(auth) => auth,
+                Err(_) => None,
+            }
+        })
+    else {
+        return;
+    };
+
+    let client = claude_cursor_proxy::providers::cursor::client::CursorHttpClient::new();
+    let client_type = claude_cursor_proxy::config::cursor_client_type();
+    let Ok(models) = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            client.fetch_available_models_for_client_type(&auth.access_token, &client_type),
+        )
+        .await
+    }) else {
+        return;
+    };
+    let Ok(models) = models else {
+        return;
+    };
+    if models.is_empty() {
+        return;
+    }
+
+    let mut lanes = claude_cursor_proxy::providers::cursor::catalog::advertised_lane_ids(&models);
+    lanes.sort_unstable();
+    if full {
+        println!(
+            "cursor (AvailableModels, {} lanes): {}",
+            lanes.len(),
+            lanes.join(", ")
+        );
+    } else {
+        let preview: Vec<_> = lanes.iter().take(24).cloned().collect();
+        let mut line = format!(
+            "cursor (AvailableModels, {} lanes): {}",
+            lanes.len(),
+            preview.join(", ")
+        );
+        if lanes.len() > preview.len() {
+            line.push_str(", …");
+            line.push_str(" run `claude-cursor-proxy models --full` for the full lane roster");
+        }
+        println!("{line}");
     }
 }
 
@@ -754,8 +828,8 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     println!("Configure Claude Code (pick a model from above):");
     println!("  export ANTHROPIC_BASE_URL=\"http://localhost:{port}\"");
     println!("  export ANTHROPIC_AUTH_TOKEN=\"anything\"");
-    println!("  export ANTHROPIC_MODEL=\"gpt-5.6-sol\"");
-    println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"gpt-5.6-luna\"");
+    println!("  export ANTHROPIC_MODEL=\"claude-fable-5-2[1m]\"");
+    println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"claude-fable-5-2[1m]\"");
     println!("  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1");
 }
 

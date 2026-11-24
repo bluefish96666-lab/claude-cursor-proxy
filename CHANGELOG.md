@@ -3,6 +3,36 @@
 Project renamed to **claude-cursor-proxy** — public repo [YeautyYE/claude-cursor-proxy](https://github.com/YeautyYE/claude-cursor-proxy).
 Adapted from [raine/claude-code-proxy](https://github.com/raine/claude-code-proxy). Earlier entries below retain upstream history (including Homebrew notes that do **not** apply here).
 
+## v0.1.120 (2026-11-24)
+
+- Fix Grok 4.7 Cursor wire ids: bare `/model grok-4.7` now maps to
+  `grok-4.7-high` / `grok-4.7-high-fast` (no `cursor-` prefix). Sending
+  `cursor-grok-4.7-*` returned `ERROR_BAD_MODEL_NAME`. Effort remapping and
+  legacy `cursor-grok-4.7-*` aliases are normalized the same way; 4.5 / 4.6
+  stay on `cursor-grok-*`.
+
+## v0.1.119 (2026-11-24)
+
+- Route Cursor's Grok 4.7 family (`grok-4.7`, `grok-4.7-fast`, `…-500k`) to
+  the Cursor provider so Claude Code does not hit the native Grok OAuth 401.
+  Native Grok remains `grok-4.5` / `grok-4.6` / `grok-composer-2.5-fast`.
+- Align Cursor model discovery with oh-my-pi: treat `AvailableModels` as the
+  authoritative account roster (OMP-style lanes: family / fast / context), and
+  keep `GetUsableModels` as a fallback/append path only for unrepresented
+  slugs — so `/v1/models` no longer floods the picker with every effort tier.
+- `claude-cursor-proxy models` now also prints the live AvailableModels lane
+  roster when Cursor auth is present (same idea as `omp models cursor`).
+- Refresh the static Cursor / Anthropic-style aliases against the Nov 2026
+  catalog: Fable 5.1 / 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5, and native
+  Grok 4.7.
+- Resolve bare family ids to current default effort tiers
+  (`claude-fable-5-2` → `…-max`, `claude-opus-5-5` → `…-high`, etc.) and keep
+  Sand Desktop family collapse ordered so numbered families never fall back
+  into their parents.
+- Attach `[1m]` wire / `/v1/models` markers for all Fable families (5 / 5.1 /
+  5.2) and remap grok-build effort onto the correct Fable 5.1 thinking rows
+  or Fable 5.2 bare effort rows.
+
 ## v0.1.118 (2026-09-08)
 
 - Keep Fable text-tool and tool-history turns on `InferenceService/Stream` so Claude Code does not send Sand traffic to a rejected `RunInference` route.

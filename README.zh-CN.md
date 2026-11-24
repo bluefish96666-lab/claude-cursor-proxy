@@ -10,12 +10,12 @@
 
 基于 [raine/claude-code-proxy](https://github.com/raine/claude-code-proxy) 改进。本地 **单向代理**：Claude Code 与 [Grok Build](https://x.ai/cli)（`grok` / grok-build）→ 本代理 → Cursor。命令行工具名与仓库名均为 **`claude-cursor-proxy`**。
 
-**让 Claude Code 和 grok-build 稳定调用 Cursor 上的模型（推荐 Fable 5）。**
+**让 Claude Code 和 grok-build 稳定调用 Cursor 上的模型（推荐 Fable 5.2）。**
 
 ```
 Claude Code ──Anthropic /v1/messages──► claude-cursor-proxy (:18765)
 grok-build  ──Responses / Messages ──►        │
-                                              ├── Cursor (Fable 5)   ← 主路径
+                                              ├── Cursor (Fable 5.2) ← 主路径
                                               ├── Codex             ← 额外后端
                                               ├── Kimi
                                               └── Grok
@@ -35,7 +35,7 @@ Claude Code 走 Anthropic（`/v1/messages`），grok-build 走 OpenAI Responses�
 2. 代理转成 Cursor 能懂的请求，再发给 Cursor
 3. 按客户端把流式回复转回去：Claude Code 用 Anthropic SSE（带 `ping` keep-alive），grok-build 用 Responses 事件
 
-**主路径是 Cursor（Fable 5）**。同一进程里还可选 Codex / Kimi / Grok 等额外后端。
+**主路径是 Cursor（Fable 5.2）**。同一进程里还可选 Codex / Kimi / Grok 等额外后端。
 
 > 本项目与 Anthropic、Cursor、OpenAI、Moonshot、xAI 均无官方关联。
 
@@ -46,7 +46,7 @@ Claude Code 走 Anthropic（`/v1/messages`），grok-build 走 OpenAI Responses�
 | | |
 | --- | --- |
 | **会话更稳** | 上游连 Cursor 长连接；下游给 Claude Code 定期 `ping`，长思考不易被掐断 |
-| **Fable 5** | 设 `ANTHROPIC_MODEL=claude-fable-5[1m]`（`ANTHROPIC_SMALL_FAST_MODEL` 写同样的即可） |
+| **Fable 5.2** | 设 `ANTHROPIC_MODEL=claude-fable-5-2[1m]`（`ANTHROPIC_SMALL_FAST_MODEL` 写同样的即可） |
 | **用量 / 上下文** | 把 Cursor 的用量信息转成 Anthropic 的 `usage`，状态栏和上下文压缩更正常 |
 | **工具调用** | 尽量把 Cursor 侧工具接到 Claude Code / grok-build 的工具循环里（尽力而为） |
 | **安装简单** | 预编译包带校验；macOS 会做 ad-hoc 签名；配置在 `~/.config/claude-cursor-proxy` |
@@ -127,13 +127,13 @@ claude-cursor-proxy cursor auth usage --json          # JSON 输出
 会按账号隔离，因此同一个 `serve` 进程可以并发使用不同账号。TUI 会保存稳定的账号
 ID；无界面配置也可以用唯一标签或邮箱作为选择器。
 
-### 3. 让 Claude Code 走本机代理（Fable 5）
+### 3. 让 Claude Code 走本机代理（Fable 5.2）
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:18765
 export ANTHROPIC_AUTH_TOKEN=unused
-export ANTHROPIC_MODEL=claude-fable-5[1m]
-export ANTHROPIC_SMALL_FAST_MODEL=claude-fable-5[1m]
+export ANTHROPIC_MODEL=claude-fable-5-2[1m]
+export ANTHROPIC_SMALL_FAST_MODEL=claude-fable-5-2[1m]
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1
 claude
@@ -244,7 +244,9 @@ GROK_CLI_CHAT_PROXY_BASE_URL=http://127.0.0.1:18765/v1 \
 
 ## 模型
 
-请把 `ANTHROPIC_MODEL` 和 `ANTHROPIC_SMALL_FAST_MODEL` 设为**完整模型 id**。Cursor 推荐默认：`claude-fable-5[1m]`。
+请把 `ANTHROPIC_MODEL` 和 `ANTHROPIC_SMALL_FAST_MODEL` 设为**完整模型 id**。Cursor 推荐默认：`claude-fable-5-2[1m]`（也可 `claude-fable-5-1[1m]` / `claude-fable-5[1m]` / `claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-5-5`）。
+
+模型列表对齐 [oh-my-pi](https://github.com/can1357/oh-my-pi) 的 Cursor 做法：以账号侧 `AvailableModels` 为权威 lane 目录（family / fast / context），`GetUsableModels` 只补充富目录未覆盖的 slug；`claude-cursor-proxy models` 在已登录时会打印 live lanes。
 
 其他后端使用各自的完整 id（例如 `gpt-5.6-sol[1m]`、`kimi-for-coding`、`grok-composer-2.5-fast`）。不认识的 id 会返回 **400**。
 

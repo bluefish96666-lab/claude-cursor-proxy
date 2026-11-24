@@ -13,7 +13,13 @@ pub const CURSOR_LEGACY_MODELS: &[&str] = &[
     "claude-opus-4-8",
     "claude-opus-5",
     "claude-opus-5-thinking-high",
+    "claude-opus-5-5",
     "claude-sonnet-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-fable-5-2",
     "cursor",
     "cursor-agent",
     "cursor-composer",
@@ -75,19 +81,12 @@ pub fn apply_effort_to_cursor_model(model: &str, effort: Option<&str>) -> String
     } else {
         ""
     };
-    if is_fable_family(&stripped) {
-        let tier = match effort {
-            "low" | "fast" | "minimal" => "claude-fable-5-thinking-low",
-            "medium" => "claude-fable-5-thinking-medium",
-            "high" => "claude-fable-5-thinking-high",
-            "xhigh" | "max" => "claude-fable-5-thinking-max",
-            _ => return model.to_string(),
-        };
+    if let Some(tier) = fable_effort_catalog_id(&stripped, effort) {
         return format!("{tier}{marker}");
     }
     if let Some(grok_model) = grok_effort_model(&stripped, effort) {
-        // Cursor's Agent catalog uses the `cursor-grok-*` namespace for
-        // effort variants.  Keep a mode prefix when the caller supplied one,
+        // Cursor's Agent catalog uses `cursor-grok-*` for 4.5/4.6 and bare
+        // `grok-*` for 4.7+. Keep a mode prefix when the caller supplied one,
         // but canonicalize the model portion so account/Sand policies see
         // the same spelling as the live catalog and TUI.
         let prefix = ["cursor-agent:", "cursor-plan:", "cursor-ask:", "cursor:"]
@@ -145,7 +144,51 @@ fn grok_effort_model(model: &str, effort: &str) -> Option<String> {
         "xhigh" | "max" => "xhigh",
         _ => return None,
     };
-    Some(format!("cursor-grok-{version}-{tier}-fast"))
+    // Cursor's live catalog dropped the `cursor-` prefix for Grok 4.7+
+    // (`grok-4.7-high-fast`). 4.5 / 4.6 still use `cursor-grok-*`.
+    let namespace = cursor_grok_catalog_namespace(version);
+    Some(format!("{namespace}-{version}-{tier}-fast"))
+}
+
+/// Catalog namespace for a Grok version on Cursor's Agent wire.
+///
+/// Grok 4.5 / 4.6 rows are still published as `cursor-grok-*`. From 4.7 onward
+/// AvailableModels / GetUsableModels use the public `grok-*` spelling, and
+/// sending `cursor-grok-4.7-*` returns `ERROR_BAD_MODEL_NAME`.
+fn cursor_grok_catalog_namespace(version: &str) -> &'static str {
+    if version == "4.5" || version == "4.6" {
+        "cursor-grok"
+    } else {
+        "grok"
+    }
+}
+
+/// Default Agent catalog slug for a bare / lane Grok 4.7-family id.
+fn resolve_grok_47_lane(model: &str) -> Option<&'static str> {
+    match model {
+        "grok-4.7" => Some("grok-4.7-high"),
+        "grok-4.7-fast" => Some("grok-4.7-high-fast"),
+        // 500k lanes are first-class AvailableModels ids; keep them intact so
+        // Cursor can apply the long-context price class.
+        "grok-4.7-500k" | "grok-4.7-500k-fast" => None,
+        _ => None,
+    }
+}
+
+/// Drop the obsolete `cursor-` prefix on Grok 4.7+ catalog rows.
+///
+/// Callers (and older CCP aliases) may still send `cursor-grok-4.7-*`; Cursor's
+/// live Agent API rejects those names with ERROR_BAD_MODEL_NAME.
+fn normalize_cursor_grok_wire_id(model: &str) -> String {
+    let Some(rest) = model.strip_prefix("cursor-grok-") else {
+        return model.to_string();
+    };
+    let version_end = rest.find('-').unwrap_or(rest.len());
+    let version = &rest[..version_end];
+    if version == "4.5" || version == "4.6" || version.is_empty() {
+        return model.to_string();
+    }
+    format!("grok-{rest}")
 }
 
 /// Resolve a model id for the Desktop Sand `InferenceService` wire.
@@ -187,19 +230,33 @@ pub fn resolve_sand_model_id(model: &str) -> String {
     // Agent catalog, in contrast, advertises effort variants and cursor-
     // prefixed Grok ids.  Normalize only recognized variant suffixes; an
     // opaque custom id is intentionally left untouched.
+    //
+    // Check more-specific numbered families before their parents so
+    // `claude-fable-5-2-*` / `claude-opus-5-5-*` never collapse into
+    // `claude-fable-5` / `claude-opus-5`.
+    if sand_family_variant(&lower, "claude-fable-5-2") {
+        return "claude-fable-5-2".to_string();
+    }
+    if sand_family_variant(&lower, "claude-fable-5-1") {
+        return "claude-fable-5-1".to_string();
+    }
     if lower == "fable" || sand_family_variant(&lower, "claude-fable-5") {
         return "claude-fable-5".to_string();
     }
-    // Fable 5.1 is a separate family.  Check it before the `claude-fable-5`
-    // rule above so its `-1-*` suffix is never mistaken for an effort tier.
-    if sand_family_variant(&lower, "claude-fable-5-1") {
-        return "claude-fable-5-1".to_string();
+    if sand_family_variant(&lower, "claude-opus-5-5") {
+        return "claude-opus-5-5".to_string();
     }
     if sand_family_variant(&lower, "claude-opus-5") {
         return "claude-opus-5".to_string();
     }
+    if sand_family_variant(&lower, "claude-sonnet-5-5") {
+        return "claude-sonnet-5-5".to_string();
+    }
     if sand_family_variant(&lower, "claude-sonnet-5") {
         return "claude-sonnet-5".to_string();
+    }
+    if sand_family_variant(&lower, "claude-haiku-5-5") {
+        return "claude-haiku-5-5".to_string();
     }
     if sand_family_variant(&lower, "claude-opus-4-7") {
         return "claude-opus-4-7".to_string();
@@ -212,6 +269,22 @@ pub fn resolve_sand_model_id(model: &str) -> String {
     }
     if sand_family_variant(&lower, "gemini-3.7-flash") {
         return "gemini-3.7-flash".to_string();
+    }
+    if sand_family_variant(&lower, "gemini-3.8-flash") {
+        return "gemini-3.8-flash".to_string();
+    }
+    for family in [
+        "gemini-4-neon",
+        "gemini-4-carbon",
+        "gemini-4-argon",
+        "gemini-4-hydrogen",
+    ] {
+        if sand_family_variant(&lower, family) {
+            return family.to_string();
+        }
+    }
+    if sand_family_variant(&lower, "grok-4.7") || sand_family_variant(&lower, "cursor-grok-4.7") {
+        return "grok-4.7".to_string();
     }
     if sand_family_variant(&lower, "grok-4.5") || sand_family_variant(&lower, "cursor-grok-4.5") {
         return "grok-4.5".to_string();
@@ -319,6 +392,16 @@ pub fn resolve_cursor_model(model: &str) -> Result<CursorModelResolution, String
             model_id: "claude-fable-5-thinking-max".to_string(),
             mode: CursorAgentMode::Agent,
         }),
+        // Fable 5.1 keeps thinking-* tiers; default to thinking-max like Fable 5.
+        "claude-fable-5-1" => Ok(CursorModelResolution {
+            model_id: "claude-fable-5-1-thinking-max".to_string(),
+            mode: CursorAgentMode::Agent,
+        }),
+        // Fable 5.2's live catalog has no thinking-* rows; default to max.
+        "claude-fable-5-2" => Ok(CursorModelResolution {
+            model_id: "claude-fable-5-2-max".to_string(),
+            mode: CursorAgentMode::Agent,
+        }),
         // Claude Desktop probes the Haiku alias even when another model is
         // selected. Some Cursor pools do not expose Haiku, so deployments may
         // route the probe to another usable catalog id without changing the
@@ -329,8 +412,16 @@ pub fn resolve_cursor_model(model: &str) -> Result<CursorModelResolution, String
             ),
             mode: CursorAgentMode::Agent,
         }),
+        "claude-haiku-5-5" => Ok(CursorModelResolution {
+            model_id: "claude-haiku-5-5-thinking-high".to_string(),
+            mode: CursorAgentMode::Agent,
+        }),
         "sonnet" | "claude-sonnet-5" => Ok(CursorModelResolution {
             model_id: "claude-sonnet-5-high".to_string(),
+            mode: CursorAgentMode::Agent,
+        }),
+        "claude-sonnet-5-5" => Ok(CursorModelResolution {
+            model_id: "claude-sonnet-5-5-high".to_string(),
             mode: CursorAgentMode::Agent,
         }),
         // Claude Desktop sends the canonical Anthropic id and ignores local
@@ -338,6 +429,11 @@ pub fn resolve_cursor_model(model: &str) -> Result<CursorModelResolution, String
         // catalog requires an explicit reasoning tier for Opus 5.
         "claude-opus-5" => Ok(CursorModelResolution {
             model_id: "claude-opus-5-thinking-high".to_string(),
+            mode: CursorAgentMode::Agent,
+        }),
+        // Opus 5.5 live rows omit thinking-*; default to high.
+        "claude-opus-5-5" => Ok(CursorModelResolution {
+            model_id: "claude-opus-5-5-high".to_string(),
             mode: CursorAgentMode::Agent,
         }),
         // Cursor advertises canonical family ids for discovery, but live runs
@@ -351,6 +447,19 @@ pub fn resolve_cursor_model(model: &str) -> Result<CursorModelResolution, String
             model_id: "claude-opus-4-8-high".to_string(),
             mode: CursorAgentMode::Agent,
         }),
+        // Cursor's Grok 4.7 family / OMP lanes. Wire ids use the public
+        // `grok-4.7-*` spelling (no `cursor-` prefix). Native Grok keeps only
+        // 4.5 / 4.6 / composer.
+        "grok-4.7" | "grok-4.7-fast" => Ok(CursorModelResolution {
+            model_id: resolve_grok_47_lane(model.as_str())
+                .unwrap_or("grok-4.7-high")
+                .to_string(),
+            mode: CursorAgentMode::Agent,
+        }),
+        "grok-4.7-500k" | "grok-4.7-500k-fast" => Ok(CursorModelResolution {
+            model_id: model.to_string(),
+            mode: CursorAgentMode::Agent,
+        }),
         other => {
             // GetUsableModels is the authority for account-specific catalog
             // ids. Preserve the exact upstream spelling so newly introduced
@@ -360,6 +469,15 @@ pub fn resolve_cursor_model(model: &str) -> Result<CursorModelResolution, String
             if let Some(model_id) = current_account_live_catalog_model(other) {
                 return Ok(CursorModelResolution {
                     model_id,
+                    mode: CursorAgentMode::Agent,
+                });
+            }
+
+            // AvailableModels lane/alias that GetUsableModels has not mirrored
+            // yet (for example `grok-4.7-fast`). Keep the requested spelling.
+            if crate::providers::cursor::catalog::known_id(other) {
+                return Ok(CursorModelResolution {
+                    model_id: other.to_string(),
                     mode: CursorAgentMode::Agent,
                 });
             }
@@ -396,11 +514,17 @@ pub fn resolve_cursor_model(model: &str) -> Result<CursorModelResolution, String
                 || other.starts_with("composer-")
                 || other.starts_with("gemini-")
                 || other.starts_with("cursor-grok-")
+                // Public `grok-*` beyond the exact native table (`grok-4.5` /
+                // `grok-4.6` / composer) belong to Cursor's catalog. Exact
+                // native ids are claimed earlier by the registry static table.
+                || other.starts_with("grok-")
                 || other.starts_with("kimi-")
                 || other.starts_with("glm-")
+                || other.starts_with("muse-")
+                || other.starts_with("deepseek-")
             {
                 return Ok(CursorModelResolution {
-                    model_id: other.to_string(),
+                    model_id: normalize_cursor_grok_wire_id(other),
                     mode: CursorAgentMode::Agent,
                 });
             }
@@ -433,8 +557,8 @@ pub fn anthropic_wire_model(request_model: &str) -> String {
     let raw = request_model.trim();
     let base = strip_anthropic_context_suffix(raw);
     let base_ref = base.as_str();
-    if is_fable_family(base_ref) || is_fable_family(raw) {
-        return "claude-fable-5[1m]".to_string();
+    if let Some(family) = fable_family_base(base_ref).or_else(|| fable_family_base(raw)) {
+        return format!("{family}[1m]");
     }
     // Preserve an explicit long-context marker the client already sent.
     if raw.contains("[1m]")
@@ -455,9 +579,9 @@ pub fn anthropic_wire_model(request_model: &str) -> String {
 pub fn anthropic_list_model_id(catalog_or_alias: &str) -> String {
     let raw = catalog_or_alias.trim();
     let base = strip_anthropic_context_suffix(raw);
-    if is_fable_family(&base) || is_fable_family(raw) {
+    if fable_family_base(&base).is_some() || fable_family_base(raw).is_some() {
         let catalog = match base.as_str() {
-            "fable" | "claude-fable-5" => "claude-fable-5",
+            "fable" => "claude-fable-5",
             other => other,
         };
         return format!("{catalog}[1m]");
@@ -465,7 +589,33 @@ pub fn anthropic_list_model_id(catalog_or_alias: &str) -> String {
     raw.to_string()
 }
 
-fn is_fable_family(model: &str) -> bool {
+/// Map grok-build / Anthropic effort onto a concrete Fable catalog id.
+///
+/// Fable 5 and 5.1 expose `thinking-*` rows; Fable 5.2's live catalog only has
+/// bare effort tiers (`-low` … `-max`, optional `-fast`).
+fn fable_effort_catalog_id(model: &str, effort: &str) -> Option<&'static str> {
+    let family = fable_family_base(model)?;
+    match (family, effort) {
+        ("claude-fable-5", "low" | "fast" | "minimal") => Some("claude-fable-5-thinking-low"),
+        ("claude-fable-5", "medium") => Some("claude-fable-5-thinking-medium"),
+        ("claude-fable-5", "high") => Some("claude-fable-5-thinking-high"),
+        ("claude-fable-5", "xhigh" | "max") => Some("claude-fable-5-thinking-max"),
+        ("claude-fable-5-1", "low" | "fast" | "minimal") => Some("claude-fable-5-1-thinking-low"),
+        ("claude-fable-5-1", "medium") => Some("claude-fable-5-1-thinking-medium"),
+        ("claude-fable-5-1", "high") => Some("claude-fable-5-1-thinking-high"),
+        ("claude-fable-5-1", "xhigh" | "max") => Some("claude-fable-5-1-thinking-max"),
+        ("claude-fable-5-2", "low" | "fast" | "minimal") => Some("claude-fable-5-2-low"),
+        ("claude-fable-5-2", "medium") => Some("claude-fable-5-2-medium"),
+        ("claude-fable-5-2", "high") => Some("claude-fable-5-2-high"),
+        ("claude-fable-5-2", "xhigh") => Some("claude-fable-5-2-xhigh"),
+        ("claude-fable-5-2", "max") => Some("claude-fable-5-2-max"),
+        _ => None,
+    }
+}
+
+/// Return the Fable family base (`claude-fable-5`, `…-5-1`, `…-5-2`) when
+/// `model` is that family or one of its effort/thinking variants.
+fn fable_family_base(model: &str) -> Option<&'static str> {
     let mut m = model.trim().to_ascii_lowercase();
     for prefix in ["cursor-agent:", "cursor-plan:", "cursor-ask:", "cursor:"] {
         if let Some(rest) = m.strip_prefix(prefix) {
@@ -473,7 +623,16 @@ fn is_fable_family(model: &str) -> bool {
             break;
         }
     }
-    m == "fable" || sand_family_variant(&m, "claude-fable-5")
+    if sand_family_variant(&m, "claude-fable-5-2") {
+        return Some("claude-fable-5-2");
+    }
+    if sand_family_variant(&m, "claude-fable-5-1") {
+        return Some("claude-fable-5-1");
+    }
+    if m == "fable" || sand_family_variant(&m, "claude-fable-5") {
+        return Some("claude-fable-5");
+    }
+    None
 }
 
 /// Strip Claude Code long-context suffixes (`[1m]`, `[2m]`, `(1M context)`) so
@@ -928,10 +1087,12 @@ pub fn cursor_anthropic_surface_models() -> Vec<String> {
             out.push(surface);
         }
     }
-    // Always advertise the Fable 1M wire id even if the live catalog is empty.
-    let fable_wire = anthropic_list_model_id("claude-fable-5");
-    if seen.insert(fable_wire.clone()) {
-        out.push(fable_wire);
+    // Always advertise Fable family 1M wire ids even if the live catalog is empty.
+    for family in ["claude-fable-5", "claude-fable-5-1", "claude-fable-5-2"] {
+        let fable_wire = anthropic_list_model_id(family);
+        if seen.insert(fable_wire.clone()) {
+            out.push(fable_wire);
+        }
     }
     out
 }
@@ -1090,12 +1251,21 @@ mod tests {
             ("claude-fable-5[1m]", "claude-fable-5"),
             ("claude-fable-5-thinking-max", "claude-fable-5"),
             ("claude-fable-5-thinking-low[1m]", "claude-fable-5"),
+            ("claude-fable-5-1-thinking-max", "claude-fable-5-1"),
+            ("claude-fable-5-2-max-fast", "claude-fable-5-2"),
             ("gemini-3.6-flash-high", "gemini-3.6-flash"),
             ("gemini-3.6-flash-medium", "gemini-3.6-flash"),
+            ("gemini-3.8-flash-high", "gemini-3.8-flash"),
+            ("gemini-4-neon-high", "gemini-4-neon"),
+            ("gemini-4-carbon-medium", "gemini-4-carbon"),
             ("cursor:grok-4.6-high-fast", "grok-4.6"),
             ("cursor-grok-4.5-high", "grok-4.5"),
+            ("cursor-grok-4.7-xhigh-fast", "grok-4.7"),
             ("claude-opus-5-thinking-high", "claude-opus-5"),
+            ("claude-opus-5-5-high", "claude-opus-5-5"),
             ("claude-sonnet-5-max", "claude-sonnet-5"),
+            ("claude-sonnet-5-5-high", "claude-sonnet-5-5"),
+            ("claude-haiku-5-5-thinking-max", "claude-haiku-5-5"),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -1112,19 +1282,86 @@ mod tests {
             resolve_sand_model_id("vendor.custom-model-v2"),
             "vendor.custom-model-v2"
         );
-        // Fable 5.1 must not collapse into the Fable 5 family.
+        // Fable 5.1 / 5.2 must not collapse into the Fable 5 family.
         let fable_51 = "claude-fable-5-1-thinking-max";
         assert_eq!(resolve_sand_model_id(fable_51), "claude-fable-5-1");
         assert_eq!(
             apply_effort_to_cursor_model(fable_51, Some("low")),
-            fable_51,
-            "effort remapping must not turn Fable 5.1 into Fable 5"
+            "claude-fable-5-1-thinking-low",
+            "effort remapping must stay inside the Fable 5.1 family"
         );
-        assert_eq!(anthropic_wire_model(fable_51), fable_51);
-        assert_eq!(anthropic_list_model_id(fable_51), fable_51);
+        assert_eq!(anthropic_wire_model(fable_51), "claude-fable-5-1[1m]");
+        assert_eq!(
+            anthropic_list_model_id(fable_51),
+            "claude-fable-5-1-thinking-max[1m]"
+        );
+        let fable_52 = "claude-fable-5-2-max";
+        assert_eq!(resolve_sand_model_id(fable_52), "claude-fable-5-2");
+        assert_eq!(
+            apply_effort_to_cursor_model("claude-fable-5-2[1m]", Some("high")),
+            "claude-fable-5-2-high[1m]"
+        );
+        assert_eq!(
+            resolve_sand_model_id("claude-opus-5-5-high"),
+            "claude-opus-5-5"
+        );
+        assert_eq!(
+            resolve_sand_model_id("claude-sonnet-5-5-medium"),
+            "claude-sonnet-5-5"
+        );
         assert_eq!(
             resolve_sand_model_id("composer-2.5-fast"),
             "composer-2.5-fast"
+        );
+    }
+
+    #[test]
+    fn resolve_new_cursor_family_aliases() {
+        assert_eq!(
+            resolve_cursor_model("claude-fable-5-1").unwrap().model_id,
+            "claude-fable-5-1-thinking-max"
+        );
+        assert_eq!(
+            resolve_cursor_model("claude-fable-5-2").unwrap().model_id,
+            "claude-fable-5-2-max"
+        );
+        assert_eq!(
+            resolve_cursor_model("claude-opus-5-5").unwrap().model_id,
+            "claude-opus-5-5-high"
+        );
+        assert_eq!(
+            resolve_cursor_model("claude-sonnet-5-5").unwrap().model_id,
+            "claude-sonnet-5-5-high"
+        );
+        assert_eq!(
+            resolve_cursor_model("claude-haiku-5-5").unwrap().model_id,
+            "claude-haiku-5-5-thinking-high"
+        );
+        assert_eq!(
+            resolve_cursor_model("grok-4.7").unwrap().model_id,
+            "grok-4.7-high"
+        );
+        assert_eq!(
+            resolve_cursor_model("grok-4.7-fast").unwrap().model_id,
+            "grok-4.7-high-fast"
+        );
+        assert_eq!(
+            resolve_cursor_model("grok-4.7-500k-fast").unwrap().model_id,
+            "grok-4.7-500k-fast"
+        );
+        assert_eq!(
+            apply_effort_to_cursor_model("grok-4.7", Some("xhigh")),
+            "grok-4.7-xhigh-fast"
+        );
+        assert_eq!(
+            apply_effort_to_cursor_model("grok-4.6", Some("high")),
+            "cursor-grok-4.6-high-fast"
+        );
+        assert_eq!(
+            resolve_cursor_model("cursor-grok-4.7-high-fast")
+                .unwrap()
+                .model_id,
+            "grok-4.7-high-fast"
         );
     }
 
